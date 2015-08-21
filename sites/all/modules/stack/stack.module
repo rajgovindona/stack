@@ -1,0 +1,403 @@
+<?php
+
+function stack_menu() {
+    $items['questions'] = array(
+        'title' => 'Stack Questions list',
+        'page callback' => 'stack_question_list',
+        'access callback' => true,
+    );
+    $items['node_vote'] = array(
+        'page callback' => 'do_node_vote',
+        'access callback' => true,
+    );
+    $items['post_question'] = array(
+        'title' => 'Post new question',
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('show_question_form'),
+        'access callback' => true,
+    );
+
+    $items['answer'] = array(
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('show_answer_form'),
+        'access callback' => true,
+    );
+    return $items;
+}
+
+function do_node_vote() {
+    global $user;
+
+    if ($user->uid > 0) {
+        $nid = $_POST['nid'];
+        $vote = $_POST['vote'];
+        $node_key = $_POST['nkey'];
+
+        if ($node_key == md5('qaz' . $nid)) {
+
+            $result = db_select("vote_track", 'vt')
+                    ->fields('vt')
+                    ->condition('vt.nid', $nid, '=')
+                    ->condition('vt.uid', $user->uid, '=')
+                    ->execute()
+                    ->fetchAssoc();
+
+            if ($result) {
+                /*
+                  if ($result['vote'] == 0) {
+                  $vote = ($vote == 'up') ? 1 : -1;
+                  }
+                  else if ($result['vote'] == 1){
+                  $vote = ($vote == 'up') ? 0 : -1;
+                  }
+                  else {
+                  $vote = ($vote == 'up') ? 1 : 0;
+                  }
+                  db_update('vote_track')
+                  ->fields(array(
+                  'vote' => $vote
+                  ))
+                  ->condition('nid', $nid, '=')
+                  ->condition('uid', $user->uid, '=')
+                  ->execute(); */
+
+                $output['status'] = 'fail';
+                $output['message'] = "You have already voted!";
+            } else {
+                $vote = ($vote == 'up') ? 1 : -1;
+
+                db_insert('vote_track')
+                        ->fields(array(
+                            'vote' => $vote,
+                            'nid' => $nid,
+                            'uid' => $user->uid
+                        ))
+                        ->execute();
+
+                $query = db_select("vote_track", 'vt')
+                        ->fields('vt', array('vote'))
+                        ->condition('vt.nid', $nid, '=');
+                $query->addExpression('SUM(vt.vote)', 'total_vote');
+                $result = $query->execute()->fetchAssoc();
+
+                if ($result) {
+
+                    $vote_node = node_load($nid);
+                    //print_r($vote_node);
+                    $vote_node->field_votes[$vote_node->language][0]['value'] = $result['total_vote'];
+                    node_save($vote_node);
+
+                    $output['status'] = 'success';
+                    $output['total_vote'] = $result['total_vote'];
+                } else {
+                    $output['status'] = 'success';
+                    $output['total_vote'] = 0;
+                }
+            }
+        }
+    } else {
+        $output['status'] = 'fail';
+        $output['message'] = "Please login to vote";
+    }
+    exit(json_encode($output));
+}
+
+function stack_question_list() {
+    global $user;
+    $nid = (int) arg(1);
+    $ip = $_SERVER['REMOTE_ADDR'];
+    $content_type = "question";
+    $nodes = node_load_multiple(array(), array('type' => $content_type));
+    $question_row_html = 'No questions found, ' . l('Ask a question', 'post_question');
+    
+    if (count($nodes)) {
+        $question_row_html = '';
+    foreach ($nodes as $products):
+        if ($products->uid == 0) {
+            $products->user_name = 'Anonymous';
+        } else {
+            $quest_user = user_load($products->uid);
+            $products->user_name = $quest_user->name;
+        }
+        $question_row_html .= theme('question_row', array('question' => $products));
+    endforeach;
+    }
+    // Get all of the article nodes
+    return theme('stack_question_list', array('content' => $question_row_html));
+}
+
+function stack_node_view($node, $view_mode) {
+    global $user;
+
+    if ($node->type == "question") {
+
+        if ($node->uid == 0) {
+            $node->node_user = 'Anonimous User';
+        } else {
+            $quest_user = user_load($node->uid);
+            $node->node_user = $quest_user->name;
+        }
+
+        $total_view = update_view_count($node->nid);
+
+        $answer_list = get_answer_list($node->nid);
+
+
+        if ($node->field_views[$node->language][0]['value'] != $total_view) {
+            $node->field_views[$node->language][0]['value'] = $total_view;
+            node_save($node);
+        }
+        if ($view_mode == 'full') {
+            $node->content['answer_list'] = array(
+                "#markup" => $answer_list,
+                "#weight" => 100
+            );
+            $node->content['my_extra_content'] = array(
+                "#markup" => drupal_get_form('show_answer_form'),
+                "#weight" => 100
+            );
+        }
+        return $node;
+    }
+}
+
+function get_answer_list($nid) {
+
+    $query = db_select('node', 'n');
+
+    $query->join('field_data_field_node_id', 'ffnid', 'n.nid = ffnid.field_node_id_value'); //JOIN node with users
+    $query->fields('ffnid', array('entity_id')); //SELECT the fields from node
+    $query->condition('n.nid', $nid, '=');
+    $nids = $query->execute()->fetchCol();
+
+    $nodes = node_load_multiple($nids);
+
+    $answer_row_html = '<div style:"float:left">No answer posted</div>';
+    $total_answer = count($nodes);
+    if ($total_answer > 0) {
+        $answer_row_html = '<div>' . $total_answer . ' answer(s) posted';
+        $answer_row_html .= '<div>';
+        //$answer_row_html .= '<ul >';
+        foreach ($nodes as $products):
+            $answer_user = user_load($products->uid);
+            if ($answer_user->uid == 0) {
+                $user_name = 'Guest User';
+            } else {
+                $user_name = $answer_user->name;
+            }
+
+            $products->user_name = $user_name;
+            //  $answer_row_html .= '<li>';
+
+            $answer_row_html .= theme('answer_row', array('answer' => $products));
+        // $answer_row_html .= '<li>';
+
+
+        endforeach;
+        // $answer_row_html .= '</ul>';
+    }
+    return $answer_row_html;
+}
+
+function show_question_form() {
+    $form['question_title'] = array(
+        '#type' => 'textfield',
+        '#title' => 'Question title',
+        '#required' => true,
+        '#description' => 'Enter your question title end with "?"',
+    );
+    $form['question_body'] = array(
+        '#type' => 'textarea',
+        '#title' => 'Question description',
+        '#required' => true,
+        '#description' => 'Describe your question with more details',
+    );
+    $form['submit'] = array(
+        '#type' => 'submit',
+        '#value' => 'Post Question',
+    );
+    $form['#theme'] = array('question_form_tpl');
+    return $form;
+}
+
+function show_question_form_validate($form, &$form_state) {
+    global $user;
+    
+    if ($user->uid == 0) {
+        form_set_error('form', 'Please login to ask for a question');
+    } else {
+        $form_data = $form_state['values'];
+        if (trim($form_data['question_title']) == '') {
+            form_set_error('question_title', 'Please enter your question title');
+        } else {
+            $question = trim($form_data['question_title']);
+            $last_char = substr($question, -1);
+            if ($last_char != '?') {
+                form_set_error('question_title', 'Your question title should end up with "?"');
+            }
+        }
+        if (trim($form_data['question_body']) == '') {
+            form_set_error('question_body', 'Please enter your question details');
+        }
+    }
+}
+
+function show_question_form_submit($form, &$form_state) {
+    $form_data = $form_state['values'];
+
+    global $user;
+
+    $node = new stdClass();
+    $node->title = $form_data['question_title'];
+    $node->type = "question";
+    node_object_prepare($node); // Sets some defaults. Invokes hook_prepare() and hook_node_prepare().
+    $node->language = LANGUAGE_NONE; // Or e.g. 'en' if locale is enabled
+    $node->uid = $user->uid;
+    $node->status = 1; //(1 or 0): published or not
+    $node->promote = 0; //(1 or 0): promoted to front page
+    $node->comment = 0; // 0 = comments disabled, 1 = read only, 2 = read/write
+
+    $node->body[$node->language][0]['value'] = $form_data['question_body'];
+    $node->body[$node->language][0]['summery'] = $form_data['question_body'];
+    $node->body[$node->language][0]['format'] = 'plain_text';
+
+    $node->field_votes[$node->language][]['value'] = 0;
+    $node->field_answers[$node->language][]['value'] = 0;
+    $node->field_views[$node->language][]['value'] = 0;
+
+
+    $node = node_submit($node); // Prepare node for saving
+    node_save($node);
+    //drupal_set_message( "Node with nid " . $node->nid . " saved!\n"); 
+
+    drupal_set_message("Your question is posted successfully");
+    drupal_goto('questions');
+}
+
+function show_answer_form() {
+    global $user;
+    $form = array();
+    $form['node_id'] = array(
+        '#type' => 'hidden',
+        '#value' => arg(1),
+    );
+    $form['answer_text'] = array(
+        '#type' => 'textarea',
+        '#required' => true,
+        '#title' => 'Enter your answer for the question',
+    );
+    $form['submit'] = array(
+        '#type' => 'submit',
+        '#value' => 'Post Your Answer',
+    );
+    $form['#theme'] = array('answers_form_tpl');
+    return $form; //return theme('answers_form_tpl', $form);
+}
+
+function show_answer_form_validate($form, &$form_state) {
+    global $user;
+    $form_value = $form_state['values'];
+    if ($user->uid == 0) {
+        form_set_error('form', t("Please login in to post your Answer"));
+    } else {
+        if (trim($form_value['answer_text']) == '') {
+            form_set_error('answer_text', "Please enter your answer");
+        }
+    }
+}
+
+function show_answer_form_submit($form, &$form_state) {
+
+    $form_data = $form_state['values'];
+
+    global $user;
+
+    $node = new stdClass();
+    $node->title = $form_data['node_id'];
+    $node->type = "answers";
+    node_object_prepare($node); // Sets some defaults. Invokes hook_prepare() and hook_node_prepare().
+    $node->language = LANGUAGE_NONE; // Or e.g. 'en' if locale is enabled
+    $node->uid = $user->uid;
+    $node->status = 1; //(1 or 0): published or not
+    $node->promote = 0; //(1 or 0): promoted to front page
+    $node->comment = 0; // 0 = comments disabled, 1 = read only, 2 = read/write
+
+    $node->body[$node->language][0]['value'] = $form_data['answer_text'];
+    $node->body[$node->language][0]['summery'] = $form_data['answer_text'];
+    $node->body[$node->language][0]['format'] = 'plain_text';
+
+    $node->field_node_id[$node->language][0]['value'] = $form_data['node_id'];
+    $node->field_correct_answer[$node->language][0]['value'] = 0;
+    $node->field_votes[$node->language][0]['value'] = 0;
+
+    // 'node' is default,
+    // Other possible values are "user" and  "taxonomy_term" 
+
+    $node = node_submit($node); // Prepare node for saving
+    node_save($node);
+
+    $quest_node = node_load($form_data['node_id']);
+    $quest_node->field_answers[$node->language][0]['value'] += 1;
+    node_save($quest_node);
+    //drupal_set_message( "Node with nid " . $node->nid . " saved!\n"); n
+    drupal_set_message("Your answer is posted successfully");
+}
+
+function stack_theme($existing, $type, $theme, $path) {
+
+    return array(
+        'stack_question_list' => array(
+            'variables' => array('content' => null),
+            'template' => 'question-list'
+        ),
+        'question_row' => array(
+            'variable' => array('question' => null),
+            'template' => 'question-row'
+        ),
+        'answer_row' => array(
+            'variable' => array('answer' => null),
+            'template' => 'answer-row'
+        ),
+        'question_form_tpl' => array(
+            'render element' => 'form',
+            'template' => 'question-form'
+        ),
+        'answers_form_tpl' => array(
+            //'variable' => array('form' => null),
+            'render element' => 'form',
+            'template' => 'answer-form'
+        ),
+    );
+}
+
+function update_view_count($nid) {
+    global $user;
+
+    $ip = $_SERVER['REMOTE_ADDR'];
+
+    $result = db_select('view_count', 'c')
+                    ->fields('c', array('count'))
+                    ->condition('c.uid', $user->uid, '=')
+                    ->condition('c.nid', $nid, '=')
+                    ->condition('c.ip', $ip, '=')
+                    ->execute()->fetchCol();
+
+    if (!$result) {
+        db_insert('view_count')
+                ->fields(array('uid' => $user->uid, 'nid' => $nid, 'ip' => $ip, 'count' => 1))
+                ->execute();
+    }
+
+    $query = db_select("view_count", "c")
+            ->fields('c', array('nid'))
+            ->condition('c.nid', $nid, '=')
+            ->groupBy('c.nid');
+    $query->addExpression('COUNT(c.nid)', 'total_count');
+
+    $result = $query->execute()->fetchAssoc();
+
+    if (isset($result['total_count']))
+        return $result['total_count'];
+    else
+        return 0;
+}

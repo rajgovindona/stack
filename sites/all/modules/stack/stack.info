@@ -1,0 +1,4 @@
+name = Stack Module
+description = Custom module of Stack Drupal test
+core = 7.x
+package = Custom
